@@ -49,8 +49,8 @@ Standard summarizers destroy the nuance of your daily life. A journal entry like
 
 ## 🤝 Support & Feedback
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](#)
-[Buy me a coffee ☕](https://ko-fi.com/mrswer)
+* [Open an Issue / Suggest Improvements](https://github.com/mrswer/openwebui-cognitive-ltm#)
+* [Buy me a coffee ☕](https://ko-fi.com/mrswer)
 
 ## 📝 License
 
