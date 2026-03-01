@@ -47,9 +47,10 @@ You can fine-tune the cognitive engine directly from the Open WebUI interface vi
 
 Standard summarizers destroy the nuance of your daily life. A journal entry like *"I felt so lonely today moving to a new city"* eventually gets compressed into *"User moved in 2026."* **Cognitive LTM** extracts the raw essence, tags it as an `[EMOTION]`, and stores it intact. Years later, when you ask your bot about that time, it retrieves your exact feelings, allowing the AI to respond with genuine empathy and deep historical context.
 
-## 🤝 Contributing
+## 🤝 Support & Feedback
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](#).
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](#)
+[Buy me a coffee ☕](https://ko-fi.com/mrswer)
 
 ## 📝 License
 
