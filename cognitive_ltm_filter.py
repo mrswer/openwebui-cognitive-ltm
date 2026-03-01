@@ -2,19 +2,19 @@
 title: Cognitive LTM Filter (Auto-Adaptive Memory)
 author: mr.swer
 description: A hybrid Long-Term Memory filter for Open WebUI. Extracts, tags, and safely consolidates memories asynchronously.
-version: 0.0.3
+version: 0.0.4
 """
 
 import json
 import logging
 import re
 import uuid
-import aiohttp
 import asyncio
-from typing import Optional, List, Dict, Any
+import aiohttp
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field
 
-# Open WebUI often runs in environments where chromadb is available
+# Open WebUI commonly provides access to chromadb in its environment
 import chromadb
 from chromadb.utils import embedding_functions
 
@@ -58,8 +58,6 @@ class Filter:
     def _init_db(self) -> None:
         """Initializes the persistent ChromaDB client."""
         try:
-            # Note: In multi-worker environments (WEBUI_WORKERS > 1), SQLite might lock.
-            # For pure production scale, consider chromadb.HttpClient() instead.
             self._db_client = chromadb.PersistentClient(path=self.valves.chroma_db_path)
             self.emb_fn = embedding_functions.DefaultEmbeddingFunction()
             self._collection = self._db_client.get_or_create_collection(
@@ -75,7 +73,6 @@ class Filter:
         if isinstance(content, str):
             return content
         elif isinstance(content, list):
-            # Handles Open WebUI multimodal list structure
             texts = [item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"]
             return " ".join(texts)
         return ""
@@ -85,7 +82,7 @@ class Filter:
         prompt = f"""
         You are a cognitive memory extractor for a Life Journal.
         Analyze the user's message. Extract significant life facts, emotional states, or preferences.
-        If it's just conversational noise, set "is_important" to false.
+        If it's just conversational noise or not worth remembering long-term, set "is_important" to false.
         
         Strictly respond with a JSON object. Format:
         {{
@@ -104,34 +101,51 @@ class Filter:
             "format": "json"
         }
 
+        # Increased timeout to 30s to handle heavy load on local GPUs
+        timeout = aiohttp.ClientTimeout(total=30)
+        
         try:
-            # Non-blocking HTTP request using aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self.valves.ollama_base_url}/api/generate", json=payload, timeout=15) as response:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{self.valves.ollama_base_url}/api/generate", json=payload) as response:
                     response.raise_for_status()
                     data = await response.json()
                     result_text = data.get("response", "")
             
-            # Regex fallback for dirty JSON
-            json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            # Non-greedy regex fallback for dirty JSON
+            json_match = re.search(r'\{.*?\}', result_text, re.DOTALL)
             if json_match:
-                parsed_data = json.loads(json_match.group(0))
-                # Validate strict keys to prevent KeyErrors later
-                if parsed_data.get("is_important") and "tag" in parsed_data and "content" in parsed_data:
-                    return parsed_data
+                try:
+                    parsed_data = json.loads(json_match.group(0))
+                    
+                    # We only proceed if the LLM deemed it important
+                    if parsed_data.get("is_important") is True:
+                        if "tag" in parsed_data and "content" in parsed_data:
+                            return parsed_data
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error in LLM output: {e}")
+                    return None
             return None
 
+        except aiohttp.ClientError as e:
+            logger.error(f"Async LLM Extractor network error: {e}")
+            return None
+        except asyncio.TimeoutError:
+            logger.error("Async LLM Extractor timeout: The model took too long to respond.")
+            return None
         except Exception as e:
-            logger.error(f"Async LLM Extractor failed: {e}")
+            logger.error(f"Unexpected error in _call_llm_extractor: {e}")
             return None
 
     def _consolidate_memory(self, memory_data: Dict[str, Any]) -> None:
-        """Evolves existing memories or creates new ones based on vector similarity."""
+        """
+        Synchronous method to evolve existing memories or create new ones.
+        Must be called via asyncio.to_thread to avoid blocking the event loop.
+        """
         if not self._collection:
             return
 
-        new_content = memory_data["content"]
-        tag = memory_data["tag"]
+        new_content = memory_data.get("content", "")
+        tag = memory_data.get("tag", "MEMORY")
 
         try:
             results = self._collection.query(
@@ -140,8 +154,16 @@ class Filter:
                 where={"tag": tag}
             )
 
+            # Robust check for empty results or IndexError
+            has_valid_distance = (
+                results and 
+                "distances" in results and 
+                results["distances"] and 
+                len(results["distances"][0]) > 0
+            )
+
             # Evolutionary Consolidation: Append instead of overwrite
-            if results["distances"] and results["distances"][0] and results["distances"][0][0] <= self.valves.consolidation_distance_threshold:
+            if has_valid_distance and results["distances"][0][0] <= self.valves.consolidation_distance_threshold:
                 doc_id = results["ids"][0][0]
                 old_content = results["documents"][0][0]
                 
@@ -182,19 +204,20 @@ class Filter:
         if not last_user_msg_raw:
             return body
 
-        # Multimodal safe text extraction
         last_user_text = self._extract_text_from_content(last_user_msg_raw)
         if not last_user_text.strip():
             return body
 
         try:
-            results = self._collection.query(
+            # Running synchronous DB query in a separate thread
+            results = await asyncio.to_thread(
+                self._collection.query,
                 query_texts=[last_user_text],
                 n_results=self.valves.max_memories_injected
             )
 
             injected_memories = []
-            if results["distances"] and results["documents"]:
+            if results and results.get("distances") and results.get("documents"):
                 for i, distance in enumerate(results["distances"][0]):
                     if distance <= self.valves.retrieval_distance_threshold:
                         tag = results["metadatas"][0][i].get("tag", "MEMORY")
@@ -205,7 +228,6 @@ class Filter:
                 memory_context = "\n".join(injected_memories)
                 system_injection = f"\n\n--- RELEVANT PAST MEMORIES ---\n{memory_context}\n------------------------------\n"
                 
-                # Safely inject into system prompt
                 if messages[0]["role"] == "system":
                     current_system = self._extract_text_from_content(messages[0]["content"])
                     messages[0]["content"] = current_system + system_injection
@@ -238,8 +260,8 @@ class Filter:
         
         # 2. Vector DB Consolidation
         if memory_data:
-            # Run the synchronous DB operation in a way that doesn't block the async loop completely
-            # For heavy loads, use asyncio.to_thread, but for local ChromaDB this is fast enough
-            self._consolidate_memory(memory_data)
+            # Delegate the synchronous ChromaDB write operation to a separate thread
+            # This completely frees the async event loop during DB operations
+            await asyncio.to_thread(self._consolidate_memory, memory_data)
 
         return body
