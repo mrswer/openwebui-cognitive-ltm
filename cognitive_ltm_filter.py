@@ -182,4 +182,64 @@ class Filter:
         if not last_user_msg_raw:
             return body
 
-        # Mult
+        # Multimodal safe text extraction
+        last_user_text = self._extract_text_from_content(last_user_msg_raw)
+        if not last_user_text.strip():
+            return body
+
+        try:
+            results = self._collection.query(
+                query_texts=[last_user_text],
+                n_results=self.valves.max_memories_injected
+            )
+
+            injected_memories = []
+            if results["distances"] and results["documents"]:
+                for i, distance in enumerate(results["distances"][0]):
+                    if distance <= self.valves.retrieval_distance_threshold:
+                        tag = results["metadatas"][0][i].get("tag", "MEMORY")
+                        doc = results["documents"][0][i]
+                        injected_memories.append(f"[{tag}] {doc}")
+
+            if injected_memories:
+                memory_context = "\n".join(injected_memories)
+                system_injection = f"\n\n--- RELEVANT PAST MEMORIES ---\n{memory_context}\n------------------------------\n"
+                
+                # Safely inject into system prompt
+                if messages[0]["role"] == "system":
+                    current_system = self._extract_text_from_content(messages[0]["content"])
+                    messages[0]["content"] = current_system + system_injection
+                else:
+                    messages.insert(0, {"role": "system", "content": system_injection})
+                
+                logger.info(f"Injected {len(injected_memories)} memories.")
+
+        except Exception as e:
+            logger.error(f"Error during inlet retrieval: {e}")
+
+        return body
+
+    async def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
+        """Extraction Phase (Async): Analyzes user input in the background."""
+        messages = body.get("messages", [])
+        if not messages:
+            return body
+
+        last_user_msg_raw = next((m["content"] for m in reversed(messages) if m["role"] == "user"), None)
+        if not last_user_msg_raw:
+            return body
+
+        last_user_text = self._extract_text_from_content(last_user_msg_raw)
+        if not last_user_text.strip():
+            return body
+
+        # 1. Async LLM extraction (non-blocking)
+        memory_data = await self._call_llm_extractor(last_user_text)
+        
+        # 2. Vector DB Consolidation
+        if memory_data:
+            # Run the synchronous DB operation in a way that doesn't block the async loop completely
+            # For heavy loads, use asyncio.to_thread, but for local ChromaDB this is fast enough
+            self._consolidate_memory(memory_data)
+
+        return body
