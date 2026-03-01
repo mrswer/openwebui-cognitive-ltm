@@ -2,7 +2,7 @@
 title: Cognitive LTM Filter (Auto-Adaptive Memory)
 author: mr.swer
 description: A hybrid Long-Term Memory filter for Open WebUI. Extracts, tags, and safely consolidates memories asynchronously.
-version: 0.0.4
+version: 0.0.5
 """
 
 import json
@@ -79,9 +79,11 @@ class Filter:
 
     async def _call_llm_extractor(self, text: str) -> Optional[Dict[str, Any]]:
         """Asynchronously calls the background LLM to extract JSON metadata."""
+        safe_text = json.dumps(text)
         prompt = f"""
         You are a cognitive memory extractor for a Life Journal.
-        Analyze the user's message. Extract significant life facts, emotional states, or preferences.
+        Analyze the user's message enclosed in <message> tags. 
+        Extract significant life facts, emotional states, or preferences.
         If it's just conversational noise or not worth remembering long-term, set "is_important" to false.
         
         Strictly respond with a JSON object. Format:
@@ -91,7 +93,9 @@ class Filter:
             "content": "A concise summary of the memory."
         }}
 
-        User message: "{text}"
+        <message>
+        {safe_text}
+        </message>
         """
 
         payload = {
